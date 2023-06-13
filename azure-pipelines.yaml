@@ -29,3 +29,603 @@ stages:
           PathtoPublish: '$(Build.ArtifactStagingDirectory)'
           ArtifactName: 'saas_app'
           publishLocation: 'Container'
+
+  - stage: DevInfraProvisioningAndAppDeploy
+    dependsOn: 'Build'
+    pool:
+      vmImage: 'ubuntu-latest'
+    jobs:
+    - job: TerraformInstallForDev
+      displayName: 'TerraformInstall'
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: TerraformInstaller@1
+        displayName: 'Install Terraform  1.4.6'
+        inputs:
+          terraformVersion: ' 1.4.6'
+
+    - job: TerraformInitValidatePlanForDev
+      displayName: 'TerraformInitValidatePlan'
+      steps:
+      - download: current
+        artifact: saas_app
+
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Init'
+        inputs:
+          command: init
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'dev-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Validate'
+        inputs:
+          command: validate
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'dev-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Plan'
+        inputs:
+          command: plan
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          commandOptions: '-var-file=dev.tfvars'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'dev-terraform.tfstate'
+      
+      - task: CopyFiles@2
+        displayName: 'Copy terraform file after plan'
+        inputs:
+          SourceFolder: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          contents: '**'
+          targetFolder: '$(Build.ArtifactStagingDirectory)/dev_tf_after_plan'
+        
+      - task: PublishBuildArtifacts@1
+        inputs:
+          pathToPublish: '$(Build.ArtifactStagingDirectory)/dev_tf_after_plan'
+          artifactName: devtfplan
+        
+    - job: ManualApprovalForDev
+      displayName: "ManualApprovalForDev"
+      dependsOn: TerraformInitValidatePlanForDev
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: |
+            saasproject86@gmail.com
+          instructions: 'Please validate the terraform plan in Dev environment and resume'
+          onTimeout: 'resume'
+    
+    - job: TerraformApplyAndDeployForDev
+      displayName: 'TerraformApplyAndDeploy'
+      dependsOn: ManualApprovalForDev
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          buildId: '$(Build.BuildId)'
+          downloadType: 'single'
+          artifactName: 'devtfplan'
+          downloadPath: '$(System.ArtifactsDirectory)'
+      
+      - script: ls -lart '$(System.ArtifactsDirectory)/devtfplan'
+        displayName: 'list all files in artifact after terraform plan'
+    
+      - script: chmod -R 755 '$(System.ArtifactsDirectory)/devtfplan'
+        displayName: 'change to executable mode recursively'
+      
+      - task: TerraformTaskV4@4
+        name: terraformApply
+        displayName: 'Terraform : Dev Apply Auto-Approve'
+        inputs:
+          command: apply
+          workingDirectory: '$(System.ArtifactsDirectory)/devtfplan'
+          commandOptions: '-var-file=dev.tfvars -auto-approve'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+    
+      - task: TerraformTaskV4@4
+        name: terraformDevApplyOutput
+        displayName: 'Terraform : Output'
+        inputs:
+          command: output
+          workingDirectory: '$(System.ArtifactsDirectory)/devtfplan'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+
+      - task: PowerShell@2
+        name: terraformDevOutput
+        displayName: ReadTerraformOutputAndAssignToVariable
+        inputs:
+          workingDirectory: '$(System.ArtifactsDirectory)/devtfplan'
+          targetType: inline
+          script: |
+            $terraformDevOutput = terraform output -json | ConvertFrom-Json
+            $terraformDevOutput | Get-Member -MemberType NoteProperty | % { $o = $terraformDevOutput.($_.Name); Write-Host "##vso[task.setvariable variable=$($_.Name);isoutput=true;issecret=$($o.sensitive)]$($o.value)" }
+            Write-output $terraformDevOutput
+      
+      - script: chmod -R 755 '$(Pipeline.Workspace)/saas_app'
+        displayName: 'Change to executable mode to run deploy shell script'
+          
+      - script: |
+          echo '$(terraformDevOutput.storage_name)'
+        displayName: 'Storage Name'
+      
+      - task: AzureCLI@2
+        displayName: DeployToDevStaticWebsite
+        inputs:
+          workingDirectory: '$(Pipeline.Workspace)/saas_app'
+          azureSubscription: 'saas_project_subscription_sc'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          arguments: '$(terraformDevOutput.storage_name)'
+          inlineScript: './scripts/deploy.sh $1'
+
+# ##################################################### 
+# ####  QA environment pipelines
+# #####################################################
+
+  - stage: QAInfraProvisioningAndAppDeploy
+    dependsOn: 'Build'
+    pool:
+      vmImage: 'ubuntu-latest'
+    jobs:
+    - job: TerraformInstallForQA
+      displayName: 'TerraformInstall'
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: TerraformInstaller@1
+        displayName: 'Install Terraform  1.4.6'
+        inputs:
+          terraformVersion: ' 1.4.6'
+
+    - job: TerraformInitValidatePlanForQA
+      displayName: 'TerraformInitValidatePlan'
+      steps:
+      - download: current
+        artifact: saas_app
+
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Init'
+        inputs:
+          command: init
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'qa-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Validate'
+        inputs:
+          command: validate
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'qa-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Plan'
+        inputs:
+          command: plan
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          commandOptions: '-var-file=qa.tfvars'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'qa-terraform.tfstate'
+      
+      - task: CopyFiles@2
+        displayName: 'Copy terraform file after plan'
+        inputs:
+          SourceFolder: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          contents: '**'
+          targetFolder: '$(Build.ArtifactStagingDirectory)/qa_tf_after_plan'
+        
+      - task: PublishBuildArtifacts@1
+        inputs:
+          pathToPublish: '$(Build.ArtifactStagingDirectory)/qa_tf_after_plan'
+          artifactName: qatfplan
+        
+    - job: ManualApprovalForQA
+      displayName: "ManualApprovalForQA"
+      dependsOn: TerraformInitValidatePlanForQA
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: |
+            saasproject86@gmail.com
+          instructions: 'Please validate the terraform plan in QA environment and resume'
+          onTimeout: 'resume'
+    
+    - job: TerraformApplyAndDeployForQA
+      displayName: 'TerraformApplyAndDeploy'
+      dependsOn: ManualApprovalForQA
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          buildId: '$(Build.BuildId)'
+          downloadType: 'single'
+          artifactName: 'qatfplan'
+          downloadPath: '$(System.ArtifactsDirectory)'
+      
+      - script: ls -lart '$(System.ArtifactsDirectory)/qatfplan'
+        displayName: 'list all files in artifact after terraform plan'
+    
+      - script: chmod -R 755 '$(System.ArtifactsDirectory)/qatfplan'
+        displayName: 'change to executable mode recursively'
+      
+      - task: TerraformTaskV4@4
+        name: terraformApply
+        displayName: 'Terraform : QA Apply Auto-Approve'
+        inputs:
+          command: apply
+          workingDirectory: '$(System.ArtifactsDirectory)/qatfplan'
+          commandOptions: '-var-file=qa.tfvars -auto-approve'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+    
+      - task: TerraformTaskV4@4
+        name: terraformQAApplyOutput
+        displayName: 'Terraform : Output'
+        inputs:
+          command: output
+          workingDirectory: '$(System.ArtifactsDirectory)/qatfplan'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+
+      - task: PowerShell@2
+        name: terraformQAOutput
+        displayName: ReadTerraformOutputAndAssignToVariable
+        inputs:
+          workingDirectory: '$(System.ArtifactsDirectory)/qatfplan'
+          targetType: inline
+          script: |
+            $terraformQAOutput = terraform output -json | ConvertFrom-Json
+            $terraformQAOutput | Get-Member -MemberType NoteProperty | % { $o = $terraformQAOutput.($_.Name); Write-Host "##vso[task.setvariable variable=$($_.Name);isoutput=true;issecret=$($o.sensitive)]$($o.value)" }
+            Write-output $terraformQAOutput
+      
+      - script: chmod -R 755 '$(Pipeline.Workspace)/saas_app'
+        displayName: 'Change to executable mode to run deploy shell script'
+          
+      - script: |
+          echo '$(terraformQAOutput.storage_name)'
+        displayName: 'Storage Name'
+      
+      - task: AzureCLI@2
+        displayName: DeployToQAStaticWebsite
+        inputs:
+          workingDirectory: '$(Pipeline.Workspace)/saas_app'
+          azureSubscription: 'saas_project_subscription_sc'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          arguments: '$(terraformQAOutput.storage_name)'
+          inlineScript: './scripts/deploy.sh $1'
+
+# ##################################################### 
+# ####  UAT environment pipelines
+# #####################################################
+
+  - stage: UATInfraProvisioningAndAppDeploy
+    dependsOn: 
+    - 'Build'
+    - 'QAInfraProvisioningAndAppDeploy'
+    pool:
+      vmImage: 'ubuntu-latest'
+    jobs:
+    - job: TerraformInstallForUAT
+      displayName: 'TerraformInstall'
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: TerraformInstaller@1
+        displayName: 'Install Terraform  1.4.6'
+        inputs:
+          terraformVersion: ' 1.4.6'
+
+    - job: TerraformInitValidatePlanForUAT
+      displayName: 'TerraformInitValidatePlan'
+      steps:
+      - download: current
+        artifact: saas_app
+
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Init'
+        inputs:
+          command: init
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'uat-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Validate'
+        inputs:
+          command: validate
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'uat-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Plan'
+        inputs:
+          command: plan
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          commandOptions: '-var-file=uat.tfvars'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'uat-terraform.tfstate'
+      
+      - task: CopyFiles@2
+        displayName: 'Copy terraform file after plan'
+        inputs:
+          SourceFolder: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          contents: '**'
+          targetFolder: '$(Build.ArtifactStagingDirectory)/uat_tf_after_plan'
+        
+      - task: PublishBuildArtifacts@1
+        inputs:
+          pathToPublish: '$(Build.ArtifactStagingDirectory)/uat_tf_after_plan'
+          artifactName: uattfplan
+        
+    - job: ManualApprovalForUAT
+      displayName: "ManualApprovalForUAT"
+      dependsOn: TerraformInitValidatePlanForUAT
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: |
+            saasproject86@gmail.com
+          instructions: 'Please validate the terraform plan in UAT environment and resume'
+          onTimeout: 'resume'
+    
+    - job: TerraformApplyAndDeployForUAT
+      displayName: 'TerraformApplyAndDeploy'
+      dependsOn: ManualApprovalForUAT
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          buildId: '$(Build.BuildId)'
+          downloadType: 'single'
+          artifactName: 'uattfplan'
+          downloadPath: '$(System.ArtifactsDirectory)'
+      
+      - script: ls -lart '$(System.ArtifactsDirectory)/uattfplan'
+        displayName: 'list all files in artifact after terraform plan'
+    
+      - script: chmod -R 755 '$(System.ArtifactsDirectory)/uattfplan'
+        displayName: 'change to executable mode recursively'
+      
+      - task: TerraformTaskV4@4
+        name: terraformApply
+        displayName: 'Terraform : UAT Apply Auto-Approve'
+        inputs:
+          command: apply
+          workingDirectory: '$(System.ArtifactsDirectory)/uattfplan'
+          commandOptions: '-var-file=uat.tfvars -auto-approve'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+    
+      - task: TerraformTaskV4@4
+        name: terraformUATApplyOutput
+        displayName: 'Terraform : Output'
+        inputs:
+          command: output
+          workingDirectory: '$(System.ArtifactsDirectory)/uattfplan'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+
+      - task: PowerShell@2
+        name: terraformUATOutput
+        displayName: ReadTerraformOutputAndAssignToVariable
+        inputs:
+          workingDirectory: '$(System.ArtifactsDirectory)/uattfplan'
+          targetType: inline
+          script: |
+            $terraformUATOutput = terraform output -json | ConvertFrom-Json
+            $terraformUATOutput | Get-Member -MemberType NoteProperty | % { $o = $terraformUATOutput.($_.Name); Write-Host "##vso[task.setvariable variable=$($_.Name);isoutput=true;issecret=$($o.sensitive)]$($o.value)" }
+            Write-output $terraformUATOutput
+      
+      - script: chmod -R 755 '$(Pipeline.Workspace)/saas_app'
+        displayName: 'Change to executable mode to run deploy shell script'
+          
+      - script: |
+          echo '$(terraformUATOutput.storage_name)'
+        displayName: 'Storage Name'
+      
+      - task: AzureCLI@2
+        displayName: DeployToUATStaticWebsite
+        inputs:
+          workingDirectory: '$(Pipeline.Workspace)/saas_app'
+          azureSubscription: 'saas_project_subscription_sc'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          arguments: '$(terraformUATOutput.storage_name)'
+          inlineScript: './scripts/deploy.sh $1'
+
+# ##################################################### 
+# ####  PROD environment pipelines
+# #####################################################
+
+  - stage: PRODInfraProvisioningAndAppDeploy
+    dependsOn:
+    - 'Build'
+    - 'UATInfraProvisioningAndAppDeploy'
+    pool:
+      vmImage: 'ubuntu-latest'
+    jobs:
+    - job: TerraformInstallForPROD
+      displayName: 'TerraformInstall'
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: TerraformInstaller@1
+        displayName: 'Install Terraform  1.4.6'
+        inputs:
+          terraformVersion: ' 1.4.6'
+
+    - job: TerraformInitValidatePlanForPROD
+      displayName: 'TerraformInitValidatePlan'
+      steps:
+      - download: current
+        artifact: saas_app
+
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Init'
+        inputs:
+          command: init
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'prod-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Validate'
+        inputs:
+          command: validate
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'prod-terraform.tfstate'
+      
+      - task: TerraformTaskV4@4
+        displayName: 'Terraform : Plan'
+        inputs:
+          command: plan
+          workingDirectory: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          commandOptions: '-var-file=prod.tfvars'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+          backendServiceArm: 'saas_project_subscription_sc'
+          backendAzureRmResourceGroupName: 'tfstate-auseast-rg'
+          backendAzureRmStorageAccountName: terraformbackend23521
+          backendAzureRmContainerName: tfstatefiles
+          backendAzureRmKey: 'prod-terraform.tfstate'
+      
+      - task: CopyFiles@2
+        displayName: 'Copy terraform file after plan'
+        inputs:
+          SourceFolder: '$(Pipeline.Workspace)/saas_app/infra_as_code/terraform_source'
+          contents: '**'
+          targetFolder: '$(Build.ArtifactStagingDirectory)/prod_tf_after_plan'
+        
+      - task: PublishBuildArtifacts@1
+        inputs:
+          pathToPublish: '$(Build.ArtifactStagingDirectory)/prod_tf_after_plan'
+          artifactName: prodtfplan
+        
+    - job: ManualApprovalForPROD
+      displayName: "ManualApprovalForPROD"
+      dependsOn: TerraformInitValidatePlanForPROD
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: |
+            saasproject86@gmail.com
+          instructions: 'Please validate the terraform plan in PROD environment and resume'
+          onTimeout: 'resume'
+    
+    - job: TerraformApplyAndDeployForPROD
+      displayName: 'TerraformApplyAndDeploy'
+      dependsOn: ManualApprovalForPROD
+      steps:
+      - download: current
+        artifact: saas_app
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          buildId: '$(Build.BuildId)'
+          downloadType: 'single'
+          artifactName: 'prodtfplan'
+          downloadPath: '$(System.ArtifactsDirectory)'
+      
+      - script: ls -lart '$(System.ArtifactsDirectory)/prodtfplan'
+        displayName: 'list all files in artifact after terraform plan'
+    
+      - script: chmod -R 755 '$(System.ArtifactsDirectory)/prodtfplan'
+        displayName: 'change to executable mode recursively'
+      
+      - task: TerraformTaskV4@4
+        name: terraformApply
+        displayName: 'Terraform : PROD Apply Auto-Approve'
+        inputs:
+          command: apply
+          workingDirectory: '$(System.ArtifactsDirectory)/prodtfplan'
+          commandOptions: '-var-file=prod.tfvars -auto-approve'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+    
+      - task: TerraformTaskV4@4
+        name: terraformPRODApplyOutput
+        displayName: 'Terraform : Output'
+        inputs:
+          command: output
+          workingDirectory: '$(System.ArtifactsDirectory)/prodtfplan'
+          environmentServiceNameAzureRM: 'saas_project_subscription_sc'
+
+      - task: PowerShell@2
+        name: terraformPRODOutput
+        displayName: ReadTerraformOutputAndAssignToVariable
+        inputs:
+          workingDirectory: '$(System.ArtifactsDirectory)/prodtfplan'
+          targetType: inline
+          script: |
+            $terraformPRODOutput = terraform output -json | ConvertFrom-Json
+            $terraformPRODOutput | Get-Member -MemberType NoteProperty | % { $o = $terraformPRODOutput.($_.Name); Write-Host "##vso[task.setvariable variable=$($_.Name);isoutput=true;issecret=$($o.sensitive)]$($o.value)" }
+            Write-output $terraformPRODOutput
+      
+      - script: chmod -R 755 '$(Pipeline.Workspace)/saas_app'
+        displayName: 'Change to executable mode to run deploy shell script'
+          
+      - script: |
+          echo '$(terraformPRODOutput.storage_name)'
+        displayName: 'Storage Name'
+      
+      - task: AzureCLI@2
+        displayName: DeployToPRODStaticWebsite
+        inputs:
+          workingDirectory: '$(Pipeline.Workspace)/saas_app'
+          azureSubscription: 'saas_project_subscription_sc'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          arguments: '$(terraformPRODOutput.storage_name)'
+          inlineScript: './scripts/deploy.sh $1'

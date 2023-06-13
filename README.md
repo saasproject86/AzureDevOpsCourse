@@ -1,29 +1,32 @@
-# README #
+# Create container in Azure storage account for terraform backend remote state file
 
-This README would normally document whatever steps are necessary to get your application up and running.
+create a container `tfstatefiles` in the storage account `terraformbackend23521` for the remote backend state file to work
 
-### What is this repository for? ###
 
-* Quick summary
-* Version
-* [Learn Markdown](https://bitbucket.org/tutorials/markdowndemo)
+Goto the terminal run init command
 
-### How do I get set up? ###
+```
+terraform init
+```
 
-* Summary of set up
-* Configuration
-* Dependencies
-* Database configuration
-* How to run tests
-* Deployment instructions
+dev.state file should be created.
 
-### Contribution guidelines ###
 
-* Writing tests
-* Code review
-* Other guidelines
+### Install terraform pulgin for Azure DevOps CI/CD
+Search 'azure devops marketplace' in google and find market place link or click the below link
 
-### Who do I talk to? ###
+https://marketplace.visualstudio.com/search?term=terraform&target=AzureDevOps&category=All%20categories&sortBy=Relevance
 
-* Repo owner or admin
-* Other community or team contact
+You need to choose this particular pulgin provided by Microsoft, not the one provided by others.
+
+Use this below link to install the pulgin into you Azure DevOps project
+https://marketplace.visualstudio.com/items?itemName=ms-devlabs.custom-terraform-tasks
+
+
+
+
+
+
+
+
+

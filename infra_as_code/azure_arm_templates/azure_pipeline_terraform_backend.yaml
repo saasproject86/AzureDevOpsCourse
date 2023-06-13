@@ -1,0 +1,38 @@
+trigger:
+  branches:
+    include:
+    - main
+    - feature/*
+  paths:
+    include:
+    - 'infra_as_code/azure_arm_templates/*'
+
+pool:
+#   vmImage: 'windows-latest'
+  vmImage: 'ubuntu-latest'
+
+variables:
+  resource_group_tfstate: 'tfstate-auseast-rg'
+  location: 'australiaeast'
+  subscription_id: 'f6e658f6-3c8c-4e1a-9380-6e81a99dd3d3'
+
+steps:
+- script: echo '$(System.DefaultWorkingDirectory)'
+  displayName: 'Run a one-line script DefaultWorkingDirectory'
+
+- script: ls '$(System.DefaultWorkingDirectory)'
+  displayName: 'ls DefaultWorkingDirectory'
+
+- task: AzureResourceManagerTemplateDeployment@3
+  inputs:
+    deploymentScope: 'Resource Group'
+    azureResourceManagerConnection: 'saas_project_subscription_sc'
+    subscriptionId: '$(subscription_id)'
+    action: 'Create Or Update Resource Group'
+    resourceGroupName: '$(resource_group_tfstate)'
+    location: '$(location)'
+    templateLocation: 'Linked artifact'
+    csmFile: '$(System.DefaultWorkingDirectory)/infra_as_code/azure_arm_templates/terraform_backend_container_creation.json'
+    csmParametersFile: '$(System.DefaultWorkingDirectory)/infra_as_code/azure_arm_templates/parameters.json'
+    deploymentMode: 'Incremental'
+    deploymentName: 'deploy2'
